@@ -1,0 +1,189 @@
+name: Publish Images
+
+on:
+  push:
+    branches: ["main"]
+  schedule:
+    - cron: '0 2 * * 0'  # Weekly on Sundays at 02:00 UTC
+
+env:
+  REGISTRY: ghcr.io
+  REPOSITORY_OWNER: lamgc
+  IMAGE_NAME: coder-workspace-images
+
+jobs:
+  detect-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      build-base: ${{ steps.detect.outputs.build-base }}
+      has-others: ${{ steps.detect.outputs.has-others }}
+      matrix: ${{ steps.detect.outputs.matrix }}
+      timestamp: ${{ steps.detect.outputs.timestamp }}
+      has-tf-changes: ${{ steps.detect.outputs.has-tf-changes }}
+      tf-matrix: ${{ steps.detect.outputs.tf-matrix }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect changed images and generate timestamp
+        id: detect
+        run: |
+          TIMESTAMP=$(date -u '+%Y%m%d%H%M%S')
+          echo "timestamp=$TIMESTAMP" >> $GITHUB_OUTPUT
+
+          # All dependent images; add new image folder names here to extend the pipeline
+          DEPENDENT_IMAGES="ubuntu-dotnet ubuntu-web ubuntu-rust ubuntu-golang"
+
+          # Scheduled runs always rebuild all images but skip template push (no tf changes)
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            echo "build-base=true" >> $GITHUB_OUTPUT
+            echo "has-others=true" >> $GITHUB_OUTPUT
+            MATRIX='[]'
+            for IMG in $DEPENDENT_IMAGES; do
+              MATRIX=$(echo "$MATRIX" | jq -c --arg img "$IMG" --arg ctx "$IMG" '. + [{"image": $img, "context": $ctx}]')
+            done
+            echo "matrix=$MATRIX" >> $GITHUB_OUTPUT
+            echo "has-tf-changes=false" >> $GITHUB_OUTPUT
+            echo "tf-matrix=[]" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          BEFORE="${{ github.event.before }}"
+          if [ "$BEFORE" = "0000000000000000000000000000000000000000" ] || \
+             ! git cat-file -e "${BEFORE}^{commit}" 2>/dev/null; then
+            # First push, force-push, or before-commit no longer exists in history —
+            # fall back to diffing against the immediate parent commit
+            CHANGED=$(git diff --name-only HEAD^..HEAD 2>/dev/null || git show --name-only --format="" HEAD)
+          else
+            CHANGED=$(git diff --name-only "$BEFORE".."${{ github.sha }}")
+          fi
+
+          echo "Changed files:"
+          echo "$CHANGED"
+
+          BASE_CHANGED=false
+          if echo "$CHANGED" | grep -q '^ubuntu-base/'; then
+            BASE_CHANGED=true
+          fi
+
+          # If ubuntu-base changed, rebuild all; otherwise only rebuild changed images
+          MATRIX='[]'
+          HAS_OTHERS=false
+          for IMG in $DEPENDENT_IMAGES; do
+            if [ "$BASE_CHANGED" = "true" ] || echo "$CHANGED" | grep -q "^${IMG}/"; then
+              HAS_OTHERS=true
+              MATRIX=$(echo "$MATRIX" | jq -c --arg img "$IMG" --arg ctx "$IMG" '. + [{"image": $img, "context": $ctx}]')
+            fi
+          done
+
+          # Detect tf file changes for Coder template push
+          # All template directories (including ubuntu-base which also has a main.tf)
+          ALL_TEMPLATE_DIRS="ubuntu-base ubuntu-dotnet ubuntu-web ubuntu-rust ubuntu-golang"
+          TF_MATRIX='[]'
+          HAS_TF=false
+          for DIR in $ALL_TEMPLATE_DIRS; do
+            if echo "$CHANGED" | grep -qE "^${DIR}/.*\.tf$"; then
+              HAS_TF=true
+              TF_MATRIX=$(echo "$TF_MATRIX" | jq -c --arg tmpl "$DIR" --arg dir "$DIR" '. + [{"template": $tmpl, "directory": $dir}]')
+            fi
+          done
+
+          echo "build-base=$BASE_CHANGED" >> $GITHUB_OUTPUT
+          echo "has-others=$HAS_OTHERS" >> $GITHUB_OUTPUT
+          echo "matrix=$MATRIX" >> $GITHUB_OUTPUT
+          echo "has-tf-changes=$HAS_TF" >> $GITHUB_OUTPUT
+          echo "tf-matrix=$TF_MATRIX" >> $GITHUB_OUTPUT
+
+  publish-base:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.build-base == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log into registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push ubuntu-base
+        uses: docker/build-push-action@v5
+        with:
+          context: ubuntu-base
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.REPOSITORY_OWNER }}/${{ env.IMAGE_NAME }}:ubuntu-base-latest
+            ${{ env.REGISTRY }}/${{ env.REPOSITORY_OWNER }}/${{ env.IMAGE_NAME }}:ubuntu-base-${{ needs.detect-changes.outputs.timestamp }}
+          cache-from: type=gha,scope=ubuntu-base
+          cache-to: type=gha,scope=ubuntu-base,mode=max
+
+  publish-others:
+    needs: [detect-changes, publish-base]
+    if: always() && !failure() && !cancelled() && needs.detect-changes.outputs.has-others == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        include: ${{ fromJson(needs.detect-changes.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log into registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push ${{ matrix.image }}
+        uses: docker/build-push-action@v5
+        with:
+          context: ${{ matrix.context }}
+          push: true
+          # Always resolve base from registry; if base was just rebuilt, ubuntu-base-latest is already updated
+          build-args: BASE=${{ env.REGISTRY }}/${{ env.REPOSITORY_OWNER }}/${{ env.IMAGE_NAME }}:ubuntu-base-latest
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.REPOSITORY_OWNER }}/${{ env.IMAGE_NAME }}:${{ matrix.image }}-latest
+            ${{ env.REGISTRY }}/${{ env.REPOSITORY_OWNER }}/${{ env.IMAGE_NAME }}:${{ matrix.image }}-${{ needs.detect-changes.outputs.timestamp }}
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,scope=${{ matrix.image }},mode=max
+
+  publish-templates:
+    needs: [detect-changes, publish-base, publish-others]
+    # Run only when tf files changed AND all image builds succeeded (or were skipped)
+    if: always() && !failure() && !cancelled() && needs.detect-changes.outputs.has-tf-changes == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include: ${{ fromJson(needs.detect-changes.outputs.tf-matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Coder CLI
+        run: curl -fsSL https://coder.com/install.sh | sh
+
+      - name: Login Coder CLI
+        run: echo ${{ secrets.CODER_CLI_TOKEN }} | coder login https://code.lamgc.me
+
+      - name: Push Coder template — ${{ matrix.template }}
+        env:
+          CODER_SESSION_TOKEN: ${{ secrets.CODER_CLI_TOKEN }}
+          CODER_URL: ${{ secrets.CODER_URL }}
+        run: |
+          coder templates push "${{ matrix.template }}" \
+            --directory "${{ matrix.directory }}" \
+            --yes

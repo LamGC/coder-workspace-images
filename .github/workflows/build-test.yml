@@ -1,0 +1,130 @@
+name: Build Test
+
+on:
+  pull_request:
+    branches: ["main"]
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  detect-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      build-base: ${{ steps.detect.outputs.build-base }}
+      has-others: ${{ steps.detect.outputs.has-others }}
+      matrix: ${{ steps.detect.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect changed images
+        id: detect
+        run: |
+          CHANGED=$(git diff --name-only origin/${{ github.base_ref }}...HEAD)
+          echo "Changed files:"
+          echo "$CHANGED"
+
+          BASE_CHANGED=false
+          if echo "$CHANGED" | grep -q '^ubuntu-base/'; then
+            BASE_CHANGED=true
+          fi
+
+          # All dependent images; add new image folder names here to extend the pipeline
+          DEPENDENT_IMAGES="ubuntu-dotnet ubuntu-web ubuntu-rust ubuntu-golang"
+
+          # If ubuntu-base changed, rebuild all; otherwise only rebuild changed images
+          MATRIX='[]'
+          HAS_OTHERS=false
+          for IMG in $DEPENDENT_IMAGES; do
+            if [ "$BASE_CHANGED" = "true" ] || echo "$CHANGED" | grep -q "^${IMG}/"; then
+              HAS_OTHERS=true
+              MATRIX=$(echo "$MATRIX" | jq -c --arg img "$IMG" --arg ctx "$IMG" '. + [{"image": $img, "context": $ctx}]')
+            fi
+          done
+
+          echo "build-base=$BASE_CHANGED" >> $GITHUB_OUTPUT
+          echo "has-others=$HAS_OTHERS" >> $GITHUB_OUTPUT
+          echo "matrix=$MATRIX" >> $GITHUB_OUTPUT
+
+  build-base:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.build-base == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build ubuntu-base
+        uses: docker/build-push-action@v5
+        with:
+          context: ubuntu-base
+          push: false
+          tags: ubuntu-base:latest
+          cache-from: type=gha,scope=ubuntu-base
+          cache-to: type=gha,scope=ubuntu-base,mode=max
+          outputs: type=docker,dest=/tmp/ubuntu-base.tar
+
+      - name: Upload ubuntu-base image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ubuntu-base-image
+          path: /tmp/ubuntu-base.tar
+          retention-days: 1
+
+  build-others:
+    needs: [detect-changes, build-base]
+    if: always() && !failure() && !cancelled() && needs.detect-changes.outputs.has-others == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include: ${{ fromJson(needs.detect-changes.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Download ubuntu-base image artifact
+        if: needs.detect-changes.outputs.build-base == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: ubuntu-base-image
+          path: /tmp
+
+      - name: Load ubuntu-base image
+        if: needs.detect-changes.outputs.build-base == 'true'
+        run: docker load -i /tmp/ubuntu-base.tar
+
+      - name: Log into registry (to pull existing base image)
+        if: needs.detect-changes.outputs.build-base != 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve BASE build arg
+        id: base-arg
+        run: |
+          if [ "${{ needs.detect-changes.outputs.build-base }}" = "true" ]; then
+            # Use locally loaded image built in this run
+            echo "value=ubuntu-base:latest" >> $GITHUB_OUTPUT
+          else
+            # Pull existing published base from registry
+            echo "value=${{ env.REGISTRY }}/${GITHUB_REPOSITORY,,}:ubuntu-base-latest" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Build ${{ matrix.image }}
+        uses: docker/build-push-action@v5
+        with:
+          context: ${{ matrix.context }}
+          push: false
+          build-args: BASE=${{ steps.base-arg.outputs.value }}
+          tags: ${{ matrix.image }}:test
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,scope=${{ matrix.image }},mode=max
