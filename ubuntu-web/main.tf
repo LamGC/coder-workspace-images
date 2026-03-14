@@ -161,7 +161,7 @@ resource "docker_volume" "home_volume" {
 
 resource "docker_container" "workspace" {
   count    = data.coder_workspace.me.start_count
-  image    = "ubuntu-web:latest"
+  image    = "ghcr.io/lamgc/coder-workspace-images:ubuntu-web-latest"
   name     = "coder-${data.coder_workspace_owner.me.name}-${lower(data.coder_workspace.me.name)}"
   hostname = data.coder_workspace.me.name
   entrypoint = [
