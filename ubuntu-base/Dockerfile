@@ -41,6 +41,11 @@ RUN install -m 0755 -d /etc/apt/keyrings\
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
+# Overlay repository-managed home defaults before capturing the workspace skeleton.
+COPY --chown=vscode:vscode skel/ /home/vscode/
+RUN chmod 0700 /home/vscode/.ssh \
+    && chmod 0644 /home/vscode/.ssh/known_hosts
+
 # Snapshot the image home directory before any volume mount can shadow it.
 # /etc/workspace-skel is restored into $HOME by entrypoint.sh on first start.
 RUN cp -rT /home/vscode /etc/workspace-skel \
