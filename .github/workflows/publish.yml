@@ -72,8 +72,9 @@ jobs:
           echo "Changed files:"
           echo "$CHANGED"
 
+          # Base or publication pipeline changes require a complete release.
           BASE_CHANGED=false
-          if echo "$CHANGED" | grep -q '^ubuntu-base/'; then
+          if echo "$CHANGED" | grep -qE '^(ubuntu-base/|\.github/workflows/publish\.yml$)'; then
             BASE_CHANGED=true
           fi
 
