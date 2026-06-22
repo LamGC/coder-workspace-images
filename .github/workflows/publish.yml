@@ -201,6 +201,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: hashicorp/setup-terraform@v3
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -219,22 +221,32 @@ jobs:
           case "$DIGEST" in sha256:*) ;; *) echo "Invalid image digest: $DIGEST" >&2; exit 1 ;; esac
           echo "value=${IMAGE}@${DIGEST}" >> "$GITHUB_OUTPUT"
 
-      - name: Pin workspace image in template
+      - name: Prepare Coder template bundle
+        id: template-bundle
         env:
           TEMPLATE_DIR: ${{ matrix.directory }}
-          WORKSPACE_IMAGE: ${{ steps.workspace-image.outputs.value }}
         run: |
-          jq -n --arg workspace_image "$WORKSPACE_IMAGE" '{workspace_image: $workspace_image}' > "$TEMPLATE_DIR/image.auto.tfvars.json"
-          jq -e '.workspace_image | test("@sha256:[0-9a-f]{64}$")' "$TEMPLATE_DIR/image.auto.tfvars.json" >/dev/null
+          BUNDLE_DIR="${RUNNER_TEMP}/coder-template-${{ matrix.template }}"
+          mkdir -p "$BUNDLE_DIR"
+          cp "$TEMPLATE_DIR"/*.tf "$BUNDLE_DIR/"
+          if compgen -G "$TEMPLATE_DIR/*.tf.json" >/dev/null; then cp "$TEMPLATE_DIR"/*.tf.json "$BUNDLE_DIR/"; fi
+          if [ -f "$TEMPLATE_DIR/.terraform.lock.hcl" ]; then cp "$TEMPLATE_DIR/.terraform.lock.hcl" "$BUNDLE_DIR/"; fi
+          terraform -chdir="$BUNDLE_DIR" init -backend=false -input=false
+          echo "directory=$BUNDLE_DIR" >> "$GITHUB_OUTPUT"
 
       - name: Install Coder CLI
-        run: curl -fsSL https://coder.com/install.sh | sh
+        env:
+          CODER_URL: ${{ secrets.CODER_URL }}
+        run: curl -fsSL "${CODER_URL%/}/install.sh" | sh
 
       - name: Push Coder template — ${{ matrix.template }}
         env:
           CODER_SESSION_TOKEN: ${{ secrets.CODER_CLI_TOKEN }}
           CODER_URL: ${{ secrets.CODER_URL }}
+          TEMPLATE_BUNDLE: ${{ steps.template-bundle.outputs.directory }}
+          WORKSPACE_IMAGE: ${{ steps.workspace-image.outputs.value }}
         run: |
           coder templates push "${{ matrix.template }}" \
-            --directory "${{ matrix.directory }}" \
+            --directory "$TEMPLATE_BUNDLE" \
+            --variable "workspace_image=$WORKSPACE_IMAGE" \
             --yes
