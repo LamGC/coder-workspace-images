@@ -19,6 +19,16 @@ variable "docker_socket" {
   type        = string
 }
 
+variable "workspace_image" {
+  description = "Immutable workspace image reference supplied by the publish workflow"
+  type        = string
+
+  validation {
+    condition     = can(regex("@sha256:[0-9a-f]{64}$", var.workspace_image))
+    error_message = "workspace_image must use an immutable sha256 digest."
+  }
+}
+
 provider "docker" {
   # Defaulting to null if the variable is an empty string lets us have an optional variable without having to set our own default
   host = var.docker_socket != "" ? var.docker_socket : null
@@ -127,7 +137,7 @@ module "vscode-web" {
   agent_id       = coder_agent.main.id
   install_prefix = "/home/vscode/.vscode-web"
   folder         = "/home/vscode"
-  extensions = ["MS-CEINTL.vscode-language-pack-zh-hans"]
+  extensions     = ["MS-CEINTL.vscode-language-pack-zh-hans"]
   accept_license = true
 }
 
@@ -140,6 +150,13 @@ module "jetbrains" {
   agent_name = "main"
   folder     = "/home/vscode"
   tooltip    = "You need to [install JetBrains Toolbox](https://coder.com/docs/user-guides/workspace-access/jetbrains/toolbox) to use this app."
+}
+
+resource "docker_image" "workspace" {
+  count = data.coder_workspace.me.start_count
+
+  name         = var.workspace_image
+  keep_locally = true
 }
 
 resource "docker_volume" "home_volume" {
@@ -171,7 +188,7 @@ resource "docker_volume" "home_volume" {
 
 resource "docker_container" "workspace" {
   count = data.coder_workspace.me.start_count
-  image = "ghcr.io/lamgc/coder-workspace-images:ubuntu-base-latest"
+  image = docker_image.workspace[0].image_id
   # Uses lower() to avoid Docker restriction on container names.
   name = "coder-${data.coder_workspace_owner.me.name}-${lower(data.coder_workspace.me.name)}"
   # Hostname makes the shell more user friendly: coder@my-workspace:~$
@@ -183,7 +200,7 @@ resource "docker_container" "workspace" {
     "sh", "-c",
     replace(coder_agent.main.init_script, "/localhost|127\\.0\\.0\\.1/", "host.docker.internal"),
   ]
-  env        = ["CODER_AGENT_TOKEN=${coder_agent.main.token}"]
+  env = ["CODER_AGENT_TOKEN=${coder_agent.main.token}"]
   host {
     host = "host.docker.internal"
     ip   = "host-gateway"

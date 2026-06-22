@@ -1,8 +1,13 @@
 name: Publish Images
 
+concurrency:
+  group: publish-images-and-templates
+  cancel-in-progress: false
+
 on:
   push:
     branches: ["main"]
+  workflow_dispatch:
   schedule:
     - cron: '0 2 * * 0'  # Weekly on Sundays at 02:00 UTC
 
@@ -34,18 +39,23 @@ jobs:
 
           # All dependent images; add new image folder names here to extend the pipeline
           DEPENDENT_IMAGES="ubuntu-dotnet ubuntu-web ubuntu-rust ubuntu-golang ubuntu-java"
+          ALL_TEMPLATE_DIRS="ubuntu-base ubuntu-dotnet ubuntu-web ubuntu-rust ubuntu-golang ubuntu-java"
 
-          # Scheduled runs always rebuild all images but skip template push (no tf changes)
-          if [ "${{ github.event_name }}" = "schedule" ]; then
+          # Scheduled and manually dispatched runs publish a complete release.
+          if [ "${{ github.event_name }}" = "schedule" ] || [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "build-base=true" >> $GITHUB_OUTPUT
             echo "has-others=true" >> $GITHUB_OUTPUT
             MATRIX='[]'
             for IMG in $DEPENDENT_IMAGES; do
               MATRIX=$(echo "$MATRIX" | jq -c --arg img "$IMG" --arg ctx "$IMG" '. + [{"image": $img, "context": $ctx}]')
             done
+            TF_MATRIX='[]'
+            for DIR in $ALL_TEMPLATE_DIRS; do
+              TF_MATRIX=$(echo "$TF_MATRIX" | jq -c --arg tmpl "$DIR" --arg dir "$DIR" '. + [{"template": $tmpl, "directory": $dir}]')
+            done
             echo "matrix=$MATRIX" >> $GITHUB_OUTPUT
-            echo "has-tf-changes=false" >> $GITHUB_OUTPUT
-            echo "tf-matrix=[]" >> $GITHUB_OUTPUT
+            echo "has-tf-changes=true" >> $GITHUB_OUTPUT
+            echo "tf-matrix=$TF_MATRIX" >> $GITHUB_OUTPUT
             exit 0
           fi
 
@@ -77,13 +87,12 @@ jobs:
             fi
           done
 
-          # Detect tf file changes for Coder template push
+          # Publish a template whenever its image inputs change.
           # All template directories (including ubuntu-base which also has a main.tf)
-          ALL_TEMPLATE_DIRS="ubuntu-base ubuntu-dotnet ubuntu-web ubuntu-rust ubuntu-golang ubuntu-java"
           TF_MATRIX='[]'
           HAS_TF=false
           for DIR in $ALL_TEMPLATE_DIRS; do
-            if echo "$CHANGED" | grep -qE "^${DIR}/.*\.tf$"; then
+            if [ "$BASE_CHANGED" = "true" ] || echo "$CHANGED" | grep -q "^${DIR}/"; then
               HAS_TF=true
               TF_MATRIX=$(echo "$TF_MATRIX" | jq -c --arg tmpl "$DIR" --arg dir "$DIR" '. + [{"template": $tmpl, "directory": $dir}]')
             fi
@@ -120,6 +129,8 @@ jobs:
         with:
           context: ubuntu-base
           push: true
+          pull: true
+          no-cache: ${{ github.event_name != 'push' }}
           tags: |
             ${{ env.REGISTRY }}/${{ env.REPOSITORY_OWNER }}/${{ env.IMAGE_NAME }}:ubuntu-base-latest
             ${{ env.REGISTRY }}/${{ env.REPOSITORY_OWNER }}/${{ env.IMAGE_NAME }}:ubuntu-base-${{ needs.detect-changes.outputs.timestamp }}
@@ -149,13 +160,27 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Resolve immutable base image
+        id: base-image
+        run: |
+          if [ "${{ needs.detect-changes.outputs.build-base }}" = "true" ]; then
+            BASE_TAG="ubuntu-base-${{ needs.detect-changes.outputs.timestamp }}"
+          else
+            BASE_TAG="ubuntu-base-latest"
+          fi
+          IMAGE="${{ env.REGISTRY }}/${{ env.REPOSITORY_OWNER }}/${{ env.IMAGE_NAME }}:${BASE_TAG}"
+          DIGEST=$(docker buildx imagetools inspect "$IMAGE" --format '{{json .Manifest.Digest}}' | tr -d '"')
+          case "$DIGEST" in sha256:*) ;; *) echo "Invalid base image digest: $DIGEST" >&2; exit 1 ;; esac
+          echo "value=${{ env.REGISTRY }}/${{ env.REPOSITORY_OWNER }}/${{ env.IMAGE_NAME }}@${DIGEST}" >> "$GITHUB_OUTPUT"
+
       - name: Build and push ${{ matrix.image }}
         uses: docker/build-push-action@v5
         with:
           context: ${{ matrix.context }}
           push: true
-          # Always resolve base from registry; if base was just rebuilt, ubuntu-base-latest is already updated
-          build-args: BASE=${{ env.REGISTRY }}/${{ env.REPOSITORY_OWNER }}/${{ env.IMAGE_NAME }}:ubuntu-base-latest
+          pull: true
+          no-cache: ${{ github.event_name != 'push' }}
+          build-args: BASE=${{ steps.base-image.outputs.value }}
           tags: |
             ${{ env.REGISTRY }}/${{ env.REPOSITORY_OWNER }}/${{ env.IMAGE_NAME }}:${{ matrix.image }}-latest
             ${{ env.REGISTRY }}/${{ env.REPOSITORY_OWNER }}/${{ env.IMAGE_NAME }}:${{ matrix.image }}-${{ needs.detect-changes.outputs.timestamp }}
@@ -164,20 +189,46 @@ jobs:
 
   publish-templates:
     needs: [detect-changes, publish-base, publish-others]
-    # Run only when tf files changed AND all image builds succeeded (or were skipped)
+    # Publish only after all required image builds have succeeded.
     if: always() && !failure() && !cancelled() && needs.detect-changes.outputs.has-tf-changes == 'true'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
     strategy:
       matrix:
         include: ${{ fromJson(needs.detect-changes.outputs.tf-matrix) }}
     steps:
       - uses: actions/checkout@v4
 
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log into registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve immutable workspace image
+        id: workspace-image
+        run: |
+          IMAGE="${{ env.REGISTRY }}/${{ env.REPOSITORY_OWNER }}/${{ env.IMAGE_NAME }}:${{ matrix.template }}-${{ needs.detect-changes.outputs.timestamp }}"
+          DIGEST=$(docker buildx imagetools inspect "$IMAGE" --format '{{json .Manifest.Digest}}' | tr -d '"')
+          case "$DIGEST" in sha256:*) ;; *) echo "Invalid image digest: $DIGEST" >&2; exit 1 ;; esac
+          echo "value=${IMAGE}@${DIGEST}" >> "$GITHUB_OUTPUT"
+
+      - name: Pin workspace image in template
+        env:
+          TEMPLATE_DIR: ${{ matrix.directory }}
+          WORKSPACE_IMAGE: ${{ steps.workspace-image.outputs.value }}
+        run: |
+          jq -n --arg workspace_image "$WORKSPACE_IMAGE" '{workspace_image: $workspace_image}' > "$TEMPLATE_DIR/image.auto.tfvars.json"
+          jq -e '.workspace_image | test("@sha256:[0-9a-f]{64}$")' "$TEMPLATE_DIR/image.auto.tfvars.json" >/dev/null
+
       - name: Install Coder CLI
         run: curl -fsSL https://coder.com/install.sh | sh
-
-      - name: Login Coder CLI
-        run: echo ${{ secrets.CODER_CLI_TOKEN }} | coder login https://code.lamgc.me
 
       - name: Push Coder template — ${{ matrix.template }}
         env:

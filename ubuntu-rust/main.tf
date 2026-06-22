@@ -19,6 +19,16 @@ variable "docker_socket" {
   type        = string
 }
 
+variable "workspace_image" {
+  description = "Immutable workspace image reference supplied by the publish workflow"
+  type        = string
+
+  validation {
+    condition     = can(regex("@sha256:[0-9a-f]{64}$", var.workspace_image))
+    error_message = "workspace_image must use an immutable sha256 digest."
+  }
+}
+
 provider "docker" {
   host = var.docker_socket != "" ? var.docker_socket : null
 }
@@ -90,11 +100,11 @@ resource "coder_agent" "main" {
   metadata {
     display_name = "Load Average (Host)"
     key          = "6_load_host"
-    script   = <<EOT
+    script       = <<EOT
       echo "`cat /proc/loadavg | awk '{ print $1 }'` `nproc`" | awk '{ printf "%0.2f", $1/$2 }'
     EOT
-    interval = 60
-    timeout  = 1
+    interval     = 60
+    timeout      = 1
   }
 
   metadata {
@@ -134,6 +144,13 @@ module "jetbrains" {
   tooltip    = "You need to [install JetBrains Toolbox](https://coder.com/docs/user-guides/workspace-access/jetbrains/toolbox) to use this app."
 }
 
+resource "docker_image" "workspace" {
+  count = data.coder_workspace.me.start_count
+
+  name         = var.workspace_image
+  keep_locally = true
+}
+
 resource "docker_volume" "home_volume" {
   name = "coder-${data.coder_workspace.me.id}-home"
   lifecycle {
@@ -159,7 +176,7 @@ resource "docker_volume" "home_volume" {
 
 resource "docker_container" "workspace" {
   count    = data.coder_workspace.me.start_count
-  image    = "ghcr.io/lamgc/coder-workspace-images:ubuntu-rust-latest"
+  image    = docker_image.workspace[0].image_id
   name     = "coder-${data.coder_workspace_owner.me.name}-${lower(data.coder_workspace.me.name)}"
   hostname = data.coder_workspace.me.name
   entrypoint = [

@@ -128,3 +128,25 @@ jobs:
           tags: ${{ matrix.image }}:test
           cache-from: type=gha,scope=${{ matrix.image }}
           cache-to: type=gha,scope=${{ matrix.image }},mode=max
+
+  validate-templates:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        template:
+          - ubuntu-base
+          - ubuntu-dotnet
+          - ubuntu-web
+          - ubuntu-rust
+          - ubuntu-golang
+          - ubuntu-java
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+
+      - name: Validate ${{ matrix.template }}
+        run: |
+          terraform -chdir="${{ matrix.template }}" fmt -check
+          terraform -chdir="${{ matrix.template }}" init -backend=false
+          terraform -chdir="${{ matrix.template }}" validate
