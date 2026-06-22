@@ -33,7 +33,7 @@ jobs:
           fi
 
           # All dependent images; add new image folder names here to extend the pipeline
-          DEPENDENT_IMAGES="ubuntu-dotnet ubuntu-web ubuntu-rust ubuntu-golang"
+          DEPENDENT_IMAGES="ubuntu-dotnet ubuntu-web ubuntu-rust ubuntu-golang ubuntu-java"
 
           # If ubuntu-base changed, rebuild all; otherwise only rebuild changed images
           MATRIX='[]'

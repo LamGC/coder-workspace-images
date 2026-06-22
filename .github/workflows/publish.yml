@@ -33,7 +33,7 @@ jobs:
           echo "timestamp=$TIMESTAMP" >> $GITHUB_OUTPUT
 
           # All dependent images; add new image folder names here to extend the pipeline
-          DEPENDENT_IMAGES="ubuntu-dotnet ubuntu-web ubuntu-rust ubuntu-golang"
+          DEPENDENT_IMAGES="ubuntu-dotnet ubuntu-web ubuntu-rust ubuntu-golang ubuntu-java"
 
           # Scheduled runs always rebuild all images but skip template push (no tf changes)
           if [ "${{ github.event_name }}" = "schedule" ]; then
@@ -79,7 +79,7 @@ jobs:
 
           # Detect tf file changes for Coder template push
           # All template directories (including ubuntu-base which also has a main.tf)
-          ALL_TEMPLATE_DIRS="ubuntu-base ubuntu-dotnet ubuntu-web ubuntu-rust ubuntu-golang"
+          ALL_TEMPLATE_DIRS="ubuntu-base ubuntu-dotnet ubuntu-web ubuntu-rust ubuntu-golang ubuntu-java"
           TF_MATRIX='[]'
           HAS_TF=false
           for DIR in $ALL_TEMPLATE_DIRS; do
