@@ -28,7 +28,7 @@ jobs:
           echo "$CHANGED"
 
           BASE_CHANGED=false
-          if echo "$CHANGED" | grep -q '^ubuntu-base/'; then
+          if echo "$CHANGED" | grep -qE '^(ubuntu-base/|\.github/workflows/build-test\.yml$)'; then
             BASE_CHANGED=true
           fi
 
@@ -68,6 +68,11 @@ jobs:
           cache-from: type=gha,scope=ubuntu-base
           cache-to: type=gha,scope=ubuntu-base,mode=max
           outputs: type=docker,dest=/tmp/ubuntu-base.tar
+
+      - name: Test workspace su access
+        run: |
+          docker load -i /tmp/ubuntu-base.tar
+          bash ubuntu-base/tests/test-su.sh ubuntu-base:latest
 
       - name: Upload ubuntu-base image artifact
         uses: actions/upload-artifact@v4

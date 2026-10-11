@@ -41,6 +41,14 @@ RUN install -m 0755 -d /etc/apt/keyrings\
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
+# Give the existing passwordless-sudo workspace user native su/su - access to
+# root, without setting/unlocking root's password or trusting other users.
+# Keep the distro's account/session checks and non-root-target authentication.
+RUN groupadd --system workspace-su \
+    && usermod --append --groups workspace-su vscode \
+    && test "$(grep -Ec '^auth[[:space:]]+sufficient[[:space:]]+pam_rootok[.]so[[:space:]]*$' /etc/pam.d/su)" = 1 \
+    && sed -i -E '/^auth[[:space:]]+sufficient[[:space:]]+pam_rootok[.]so[[:space:]]*$/a auth sufficient pam_wheel.so trust use_uid root_only group=workspace-su' /etc/pam.d/su
+
 # Overlay repository-managed home defaults before capturing the workspace skeleton.
 COPY --chown=vscode:vscode skel/ /home/vscode/
 RUN chmod 0700 /home/vscode/.ssh \
