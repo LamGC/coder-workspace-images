@@ -45,6 +45,7 @@ mcr.microsoft.com/devcontainers/base:ubuntu
 │   ├── Dockerfile          # 公共工具和基础环境
 │   ├── entrypoint.sh       # 首次启动时初始化 home 目录
 │   ├── skel/               # 随镜像提供的个人默认配置
+│   ├── tests/test-su.sh     # root shell 权限回归测试
 │   └── main.tf             # 基础 Workspace 模板
 ├── ubuntu-dotnet/          # .NET 镜像与模板
 ├── ubuntu-web/             # Web 镜像与模板
@@ -145,9 +146,26 @@ coder templates push ubuntu-web \
 - 模板中的 VS Code Web 模块设置了 `accept_license = true`。使用前请检查相关许可及模块配置是否符合自己的需求。
 - 镜像安装 Docker 工具不代表 Workspace 已接通可用的 Docker daemon。当前模板没有挂载宿主机 Docker socket，也没有配置特权容器或启动 DinD；需要在 Workspace 内运行 Docker 时，应自行选择并配置连接方式，同时评估权限风险。
 
+### Workspace 中的 root shell
+
+`ubuntu-base` 及其派生语言镜像允许 `vscode` 用户直接执行 `su` 或 `su -`，免密码进入 root shell；原有的免密 `sudo` 仍可使用。
+
+这项权限通过专用的 `workspace-su` 组授予，镜像内该组仅包含 `vscode`，并且只对 UID 为 0 的目标账户生效。其他调用用户及非 root 目标仍按原有规则认证。配置不会设置、清空或解锁 root 密码，也保留系统的 PAM account / session 检查。加入 `workspace-su` 组意味着获得 root 权限，请勿将不可信用户加入该组。
+
+权限配置安装在镜像中，与 home 初始化标记无关。已有 Workspace 需要切换到包含此配置的新镜像并重建容器，才能获得该行为；不需要清空或重置 home volume。
+
+可在仓库根目录运行回归测试：
+
+```sh
+docker build --builder default -t coder-ubuntu-base:su-test ./ubuntu-base
+bash ubuntu-base/tests/test-su.sh coder-ubuntu-base:su-test
+```
+
+测试仅在一次性容器中创建测试用户，检查 `su` / `su -`、免密 `sudo` 和 root 密码锁定状态，并验证未授权调用者、非 root 目标及伪装环境变量不会绕过认证。PR 工作流构建基础镜像时，会先执行这些测试，再构建依赖镜像。
+
 ## 自动构建与发布
 
-[Build Test](.github/workflows/build-test.yml) 在面向 `main` 的 PR 上运行：根据目录变化选择构建镜像；基础镜像变化时构建全部语言镜像；同时对六个 `ubuntu-*` 模板执行 Terraform 格式检查、初始化和验证。测试构建不发布镜像。
+[Build Test](.github/workflows/build-test.yml) 在面向 `main` 的 PR 上运行：根据目录变化选择构建镜像；基础镜像或该构建工作流变化时，先构建基础镜像并运行 root shell 权限回归测试，再构建全部语言镜像；同时对六个 `ubuntu-*` 模板执行 Terraform 格式检查、初始化和验证。测试构建不发布镜像。
 
 [Publish Images](.github/workflows/publish.yml) 在推送到 `main`、手动触发，以及每周日 02:00 UTC 时运行：
 
